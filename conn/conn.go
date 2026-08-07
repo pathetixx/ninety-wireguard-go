@@ -31,6 +31,18 @@ type ReceiveFunc func(packets [][]byte, sizes []int, eps []Endpoint) (n int, err
 //
 // A Bind interface may also be a PeekLookAtSocketFd or BindSocketToInterface,
 // depending on the platform-specific implementation.
+// NoModifySender is an optional capability of a Bind: sending buffers as they
+// are, skipping the per-endpoint reserved-byte rewrite Send performs. Junk
+// packets are not WireGuard packets, so stamping a routing key into their
+// 2nd-4th bytes would only make them recognisable.
+//
+// Deliberately not part of Bind: sing-box embeds binds this module does not own
+// (tailscale's magicsock among them), and widening the interface would break
+// every one of them. Callers fall back to Send.
+type NoModifySender interface {
+	SendWithoutModify(bufs [][]byte, ep Endpoint, offset int) error
+}
+
 type Bind interface {
 	// Open puts the Bind into a listening state on a given port and reports the actual
 	// port that it bound to. Passing zero results in a random selection.
@@ -50,12 +62,6 @@ type Bind interface {
 	// element of the bufs slice. Space preceding offset is free to use for
 	// additional encapsulation. The length of bufs must not exceed BatchSize().
 	Send(bufs [][]byte, ep Endpoint, offset int) error
-
-	// SendWithoutModify sends the buffers as they are, skipping the per-endpoint
-	// reserved-byte rewrite Send performs. Junk packets are not WireGuard
-	// packets, so stamping a routing key into their 2nd-4th bytes would only
-	// make them recognisable.
-	SendWithoutModify(bufs [][]byte, ep Endpoint, offset int) error
 
 	// ParseEndpoint creates a new endpoint from a string.
 	ParseEndpoint(s string) (Endpoint, error)

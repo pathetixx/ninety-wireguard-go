@@ -139,7 +139,12 @@ func (peer *Peer) SendBuffersWithoutModify(buffers [][]byte) error {
 	}
 	peer.endpoint.Unlock()
 
-	err := peer.device.net.bind.SendWithoutModify(buffers, endpoint, MessageEncapsulatingTransportSize)
+	var err error
+	if sender, ok := peer.device.net.bind.(conn.NoModifySender); ok {
+		err = sender.SendWithoutModify(buffers, endpoint, MessageEncapsulatingTransportSize)
+	} else {
+		err = peer.device.net.bind.Send(buffers, endpoint, MessageEncapsulatingTransportSize)
+	}
 	if err == nil {
 		var totalLen uint64
 		for _, b := range buffers {
