@@ -24,6 +24,9 @@ signature.
   interrupts a burst that is between packets when the bind closes.
 - `device/peer.go` — `SendBuffersWithoutModify` sends a payload untouched, and
   `Stop` interrupts an in-flight burst.
-- `conn/` — `SendWithoutModify` on the `Bind` interface and its implementations.
+- `conn/` — the optional `NoModifySender` interface and its implementations.
   Junk packets are not WireGuard packets, so stamping the per-endpoint reserved
-  routing key into their 2nd-4th bytes would only make them recognisable.
+  routing key into their 2nd-4th bytes would only make them recognisable. It is
+  deliberately not part of `Bind`: sing-box embeds binds this module does not
+  own (tailscale's magicsock among them), and widening `Bind` would break every
+  one of them. Callers fall back to `Send`.
