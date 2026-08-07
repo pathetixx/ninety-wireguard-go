@@ -37,12 +37,14 @@ jobs:
           CGO_ENABLED: "0"
         run: go vet ./noise/...
 
+      # Everything except the module root: that is upstream's standalone daemon,
+      # whose main() is unix-only, so it cannot link under GOOS=windows.
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: amd64
           CGO_ENABLED: "0"
-        run: go build ./...
+        run: go build $(go list ./... | grep -v '^github.com/sagernet/wireguard-go$')
 
       - name: Test
         if: matrix.goos == 'linux'
