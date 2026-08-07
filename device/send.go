@@ -6,14 +6,17 @@
 package device
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/sagernet/wireguard-go/conn"
+	"github.com/sagernet/wireguard-go/noise"
 	"github.com/sagernet/wireguard-go/tun"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
@@ -135,6 +138,11 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
+	// Junk first: the point is that the DPI box sees noise before it sees
+	// anything that looks like a handshake initiation.
+	if err = peer.sendNoise(); err != nil {
+		return err
+	}
 	err = peer.SendBuffers([][]byte{buf})
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
@@ -634,4 +642,64 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 
 		peer.keepKeyFreshSending()
 	}
+}
+
+// sendJunkPacket sends one junk datagram: an optional header byte drawn from
+// the configured set, a fixed pseudo-header and a random payload.
+func (peer *Peer) sendJunkPacket(headers []byte, payload []byte, noModify bool) error {
+	var prefix []byte
+	if len(headers) > 0 {
+		prefix = []byte{headers[noise.RandBetween(0, int64(len(headers)-1))], 0x00, 0x00, 0x00, 0x01, 0x08}
+	} else {
+		prefix = []byte{0x00, 0x00, 0x00, 0x01, 0x08}
+	}
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return err
+	}
+	tail := []byte{0x00, 0x00, 0x44, 0xD0}
+
+	packet := make([]byte, 0, len(prefix)+len(nonce)+len(tail)+len(payload))
+	packet = append(packet, prefix...)
+	packet = append(packet, nonce...)
+	packet = append(packet, tail...)
+	packet = append(packet, payload...)
+
+	if noModify {
+		return peer.SendBuffersWithoutModify([][]byte{packet})
+	}
+	return peer.SendBuffers([][]byte{packet})
+}
+
+// sendNoise sends the configured burst of junk packets, spacing them out by a
+// random delay. It gives up quietly if the device or the peer goes away.
+func (peer *Peer) sendNoise() error {
+	options := peer.device.Noise.FakePacket
+	if !options.Enabled || options.Count.To == 0 || options.Size.To == 0 {
+		return nil
+	}
+
+	count := options.Count.Rand()
+	for i := 0; i < count; i++ {
+		if peer.device.isClosed() || !peer.isRunning.Load() {
+			return nil
+		}
+		payload := make([]byte, options.Size.Rand())
+		if _, err := rand.Read(payload); err != nil {
+			return fmt.Errorf("generate junk packet: %w", err)
+		}
+		if err := peer.sendJunkPacket(options.Header, payload, options.NoModify); err != nil {
+			return fmt.Errorf("send junk packet: %w", err)
+		}
+		if i < count-1 {
+			select {
+			case <-peer.device.noiseStop:
+				return nil
+			case <-peer.device.closed:
+				return nil
+			case <-time.After(time.Duration(options.Delay.Rand()) * time.Millisecond):
+			}
+		}
+	}
+	return nil
 }

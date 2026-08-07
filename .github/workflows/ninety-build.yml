@@ -1,0 +1,46 @@
+name: Build check
+
+# The module ships inside Ninety's sing-box core, which targets windows/amd64.
+# Vet and build both platforms: the junk-traffic path has a WinRingBind
+# implementation that only compiles under GOOS=windows.
+
+on:
+  push:
+    branches:
+      - ninety
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [windows, linux]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+
+      - name: Vet
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go vet ./...
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+      - name: Test
+        if: matrix.goos == 'linux'
+        run: go test ./noise/...

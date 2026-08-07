@@ -116,6 +116,40 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 // SendBuffers sends buffers to peer. WireGuard packet data in each element of
 // buffers must be preceded by MessageEncapsulatingTransportSize number of
 // bytes.
+// SendBuffersWithoutModify is SendBuffers for junk traffic: identical, except
+// the bind is told to leave the payload alone instead of stamping the
+// per-endpoint reserved bytes into it.
+func (peer *Peer) SendBuffersWithoutModify(buffers [][]byte) error {
+	peer.device.net.RLock()
+	defer peer.device.net.RUnlock()
+
+	if peer.device.isClosed() {
+		return nil
+	}
+
+	peer.endpoint.Lock()
+	endpoint := peer.endpoint.val
+	if endpoint == nil {
+		peer.endpoint.Unlock()
+		return errors.New("no known endpoint for peer")
+	}
+	if peer.endpoint.clearSrcOnTx {
+		endpoint.ClearSrc()
+		peer.endpoint.clearSrcOnTx = false
+	}
+	peer.endpoint.Unlock()
+
+	err := peer.device.net.bind.SendWithoutModify(buffers, endpoint, MessageEncapsulatingTransportSize)
+	if err == nil {
+		var totalLen uint64
+		for _, b := range buffers {
+			totalLen += uint64(len(b))
+		}
+		peer.txBytes.Add(totalLen)
+	}
+	return err
+}
+
 func (peer *Peer) SendBuffers(buffers [][]byte) error {
 	peer.device.net.RLock()
 	defer peer.device.net.RUnlock()
@@ -265,6 +299,11 @@ func (peer *Peer) Stop() {
 
 	if !peer.isRunning.Swap(false) {
 		return
+	}
+
+	select {
+	case peer.device.noiseStop <- 1:
+	default:
 	}
 
 	peer.device.log.Verbosef("%v - Stopping", peer)

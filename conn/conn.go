@@ -51,6 +51,12 @@ type Bind interface {
 	// additional encapsulation. The length of bufs must not exceed BatchSize().
 	Send(bufs [][]byte, ep Endpoint, offset int) error
 
+	// SendWithoutModify sends the buffers as they are, skipping the per-endpoint
+	// reserved-byte rewrite Send performs. Junk packets are not WireGuard
+	// packets, so stamping a routing key into their 2nd-4th bytes would only
+	// make them recognisable.
+	SendWithoutModify(bufs [][]byte, ep Endpoint, offset int) error
+
 	// ParseEndpoint creates a new endpoint from a string.
 	ParseEndpoint(s string) (Endpoint, error)
 
