@@ -6,8 +6,11 @@ wireguard-go for [Ninety](https://github.com/pathetixx/190x4-Ninety), forked fro
 The module path stays `github.com/sagernet/wireguard-go`; Ninety's core pulls
 this fork in with a `replace` directive.
 
-Branch `ninety` carries the delta on top of an upstream commit. `upstream`
-remote points at sagernet; updating means merging upstream into `ninety`.
+Branch `ninety` carries the delta on top of an upstream tag. `upstream`
+remote points at sagernet; updating means replaying the delta on the new tag,
+because sagernet rebases its branch and the old line stops merging cleanly.
+
+Base: **v0.0.4**
 
 ## Delta to upstream
 

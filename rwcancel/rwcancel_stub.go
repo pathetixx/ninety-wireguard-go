@@ -1,4 +1,4 @@
-//go:build windows || wasm || plan9 || tamago
+//go:build windows || wasm
 
 // SPDX-License-Identifier: MIT
 
