@@ -650,7 +650,26 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 
 // sendJunkPacket sends one junk datagram: an optional header byte drawn from
 // the configured set, a fixed pseudo-header and a random payload.
-func (peer *Peer) sendJunkPacket(headers []byte, payload []byte, noModify bool) error {
+// junkHeaderSize is the fixed part of a junk packet: the shaped prefix, an
+// 8-byte nonce and a 4-byte tail. A junk packet is never shorter than this.
+func junkHeaderSize(headers []byte) int {
+	if len(headers) > 0 {
+		return 6 + 8 + 4
+	}
+	return 5 + 8 + 4
+}
+
+// buildJunkPacket renders one junk packet of size bytes as it goes on the wire,
+// returned with the MessageEncapsulatingTransportSize bytes SendBuffers
+// requires in front of it.
+//
+// The shape mimics a WARP data packet — a type byte, three bytes the bind fills
+// with the endpoint's reserved routing key, 0x01 0x08, a nonce, 0x00 0x00 0x44
+// 0xD0 — so a classifier sees the flow open with something that already belongs
+// on this port. Those leading bytes only survive if the encapsulating room is
+// there: without it the bind strips the whole prefix and half the nonce, and
+// what reaches the wire is the random tail of a packet nobody designed.
+func buildJunkPacket(headers []byte, size int) ([]byte, error) {
 	var prefix []byte
 	if len(headers) > 0 {
 		prefix = []byte{headers[noise.RandBetween(0, int64(len(headers)-1))], 0x00, 0x00, 0x00, 0x01, 0x08}
@@ -659,16 +678,34 @@ func (peer *Peer) sendJunkPacket(headers []byte, payload []byte, noModify bool) 
 	}
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
-		return err
+		return nil, err
 	}
 	tail := []byte{0x00, 0x00, 0x44, 0xD0}
 
-	packet := make([]byte, 0, len(prefix)+len(nonce)+len(tail)+len(payload))
+	// Size is the packet on the wire, the way the setting reads it out to the
+	// user; the fixed part is a floor, not an addition.
+	payloadLen := size - junkHeaderSize(headers)
+	if payloadLen < 0 {
+		payloadLen = 0
+	}
+	payload := make([]byte, payloadLen)
+	if _, err := rand.Read(payload); err != nil {
+		return nil, err
+	}
+
+	packet := make([]byte, MessageEncapsulatingTransportSize, MessageEncapsulatingTransportSize+len(prefix)+len(nonce)+len(tail)+len(payload))
 	packet = append(packet, prefix...)
 	packet = append(packet, nonce...)
 	packet = append(packet, tail...)
 	packet = append(packet, payload...)
+	return packet, nil
+}
 
+func (peer *Peer) sendJunkPacket(headers []byte, size int, noModify bool) error {
+	packet, err := buildJunkPacket(headers, size)
+	if err != nil {
+		return err
+	}
 	if noModify {
 		return peer.SendBuffersWithoutModify([][]byte{packet})
 	}
@@ -688,11 +725,7 @@ func (peer *Peer) sendNoise() error {
 		if peer.device.isClosed() || !peer.isRunning.Load() {
 			return nil
 		}
-		payload := make([]byte, options.Size.Rand())
-		if _, err := rand.Read(payload); err != nil {
-			return fmt.Errorf("generate junk packet: %w", err)
-		}
-		if err := peer.sendJunkPacket(options.Header, payload, options.NoModify); err != nil {
+		if err := peer.sendJunkPacket(options.Header, options.Size.Rand(), options.NoModify); err != nil {
 			return fmt.Errorf("send junk packet: %w", err)
 		}
 		if i < count-1 {

@@ -163,3 +163,55 @@ func TestSpecialPacketRender(t *testing.T) {
 		t.Fatal("<t> produced a zero timestamp")
 	}
 }
+
+// A junk packet must arrive on the wire as it was designed: the bind strips
+// MessageEncapsulatingTransportSize bytes off the front of everything it sends,
+// so a packet built without that room loses its whole prefix and half its nonce.
+// That is exactly what used to happen, and nothing in the flow showed it.
+func TestJunkPacketKeepsItsShapeOnTheWire(t *testing.T) {
+	packet, err := buildJunkPacket(nil, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onWire := packet[MessageEncapsulatingTransportSize:]
+	if len(onWire) != 64 {
+		t.Fatalf("packet on the wire is %d bytes, want the configured 64", len(onWire))
+	}
+	for i, want := range []byte{0x00, 0x00, 0x00, 0x01, 0x08} {
+		if onWire[i] != want {
+			t.Fatalf("prefix byte %d is %#x, want %#x", i, onWire[i], want)
+		}
+	}
+	for i, want := range []byte{0x00, 0x00, 0x44, 0xD0} {
+		if onWire[13+i] != want {
+			t.Fatalf("tail byte %d is %#x, want %#x", i, onWire[13+i], want)
+		}
+	}
+
+	// With a header set the type byte comes from it, and the three bytes the
+	// bind fills with the reserved routing key stay zero.
+	headed, err := buildJunkPacket([]byte{0xCE}, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onWire = headed[MessageEncapsulatingTransportSize:]
+	if onWire[0] != 0xCE {
+		t.Fatalf("type byte is %#x, want 0xce", onWire[0])
+	}
+	if onWire[1] != 0 || onWire[2] != 0 || onWire[3] != 0 {
+		t.Fatalf("reserved bytes are not zero: %x", onWire[1:4])
+	}
+	if len(onWire) != 64 {
+		t.Fatalf("packet on the wire is %d bytes, want 64", len(onWire))
+	}
+
+	// A size below the fixed part is a floor, not a truncation: the shaped
+	// header is the entire point of the packet.
+	small, err := buildJunkPacket(nil, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(small) - MessageEncapsulatingTransportSize; got != junkHeaderSize(nil) {
+		t.Fatalf("undersized packet is %d bytes, want the %d-byte header", got, junkHeaderSize(nil))
+	}
+}

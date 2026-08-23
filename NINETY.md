@@ -21,8 +21,12 @@ signature.
 
 - `noise/options.go` — configuration: whether junk is enabled, how many packets,
   what size, how far apart, which header bytes to draw from.
-- `device/send.go` — `sendNoise` sends the burst, `sendJunkPacket` builds one
-  packet. Hooked into the handshake initiation path.
+- `device/send.go` — `sendNoise` sends the burst, `buildJunkPacket` renders one
+  packet and `sendJunkPacket` sends it. Hooked into the handshake initiation
+  path. A junk packet carries the `MessageEncapsulatingTransportSize` bytes
+  `SendBuffers` requires in front of it, and its configured size is the size on
+  the wire: without that room the bind stripped the shaped prefix and half the
+  nonce off every junk packet, and the size setting was off by nine bytes.
 - `device/device.go` — `Device.Noise` holds the configuration; `noiseStop`
   interrupts a burst that is between packets when the bind closes.
 - `device/peer.go` — `SendBuffersWithoutModify` sends a payload untouched, and
