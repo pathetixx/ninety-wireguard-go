@@ -98,6 +98,10 @@ type Device struct {
 	// Noise is AmneziaWG-style junk traffic sent right before the handshake
 	// initiation. Zero value means disabled.
 	Noise noise.Options
+	// amnezia holds the compiled AmneziaWG shaping from Noise.Amnezia, or nil
+	// when the device speaks plain WireGuard. Written by SetNoise before the
+	// device is brought up and only read afterwards.
+	amnezia *amneziaState
 	// noiseStop interrupts a junk burst that is between packets when the bind
 	// closes or a peer stops, so shutdown does not wait out the delays.
 	noiseStop chan int

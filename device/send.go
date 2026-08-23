@@ -130,9 +130,10 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 		return err
 	}
 
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageInitiationSize)
-	packet := buf[MessageEncapsulatingTransportSize:]
+	buf, packet := peer.device.padHandshake(MessageInitiationType, MessageInitiationSize)
 	_ = msg.marshal(packet)
+	// MACs cover the message only: the S1 padding in front of it is not part of
+	// the protocol, it is there to change the packet length.
 	peer.cookieGenerator.AddMacs(packet)
 
 	peer.timersAnyAuthenticatedPacketTraversal()
@@ -143,7 +144,10 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	if err = peer.sendNoise(); err != nil {
 		return err
 	}
-	err = peer.SendBuffers([][]byte{buf})
+	if err = peer.sendAmneziaPrologue(); err != nil {
+		return err
+	}
+	err = peer.sendPackets([][]byte{buf})
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
 	}
@@ -165,8 +169,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 		return err
 	}
 
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageResponseSize)
-	packet := buf[MessageEncapsulatingTransportSize:]
+	buf, packet := peer.device.padHandshake(MessageResponseType, MessageResponseSize)
 	_ = response.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
 
@@ -181,7 +184,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersAnyAuthenticatedPacketSent()
 
 	// TODO: allocation could be avoided
-	err = peer.SendBuffers([][]byte{buf})
+	err = peer.sendPackets([][]byte{buf})
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
 	}
@@ -198,6 +201,7 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 		return err
 	}
 
+	reply.Type = device.messageType(MessageCookieReplyType)
 	buf := make([]byte, MessageEncapsulatingTransportSize+MessageCookieReplySize)
 	packet := buf[MessageEncapsulatingTransportSize:]
 	_ = reply.marshal(packet)
@@ -552,7 +556,7 @@ func (device *Device) RoutineEncryption(id int) {
 			fieldReceiver := header[4:8]
 			fieldNonce := header[8:16]
 
-			binary.LittleEndian.PutUint32(fieldType, MessageTransportType)
+			binary.LittleEndian.PutUint32(fieldType, device.messageType(MessageTransportType))
 			binary.LittleEndian.PutUint32(fieldReceiver, elem.keypair.remoteIndex)
 			binary.LittleEndian.PutUint64(fieldNonce, elem.nonce)
 
@@ -619,7 +623,7 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketSent()
 
-		err := peer.SendBuffers(bufs)
+		err := peer.sendPackets(bufs)
 		if dataSent {
 			peer.timersDataSent()
 		}

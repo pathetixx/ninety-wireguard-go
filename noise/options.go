@@ -15,6 +15,10 @@ import (
 
 type Options struct {
 	FakePacket FakePacketOptions `json:"fake_packet"`
+	// Amnezia carries an AmneziaWG .conf verbatim (Jc/Jmin/Jmax, S1/S2, H1..H4,
+	// I1..I5). It shapes the protocol itself, unlike FakePacket, which only
+	// prefixes junk of our own shape.
+	Amnezia AmneziaOptions `json:"amnezia,omitempty"`
 }
 
 type FakePacketOptions struct {

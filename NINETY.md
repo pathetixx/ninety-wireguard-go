@@ -27,6 +27,18 @@ signature.
   interrupts a burst that is between packets when the bind closes.
 - `device/peer.go` — `SendBuffersWithoutModify` sends a payload untouched, and
   `Stop` interrupts an in-flight burst.
+- `noise/amnezia.go`, `noise/special.go` — AmneziaWG shaping taken verbatim from
+  a `.conf`: `Jc/Jmin/Jmax` junk packets, `S1/S2` handshake padding, `H1..H4`
+  message type replacements and the `I1..I5` specified packets, with their
+  `<b …>/<r …>/<rc …>/<rd …>/<t>` syntax.
+- `device/amnezia.go` — `SetNoise` validates and compiles that configuration;
+  `classifyPacket` recognises an incoming packet under it, `padHandshake` frames
+  an outgoing one, `sendAmneziaPrologue` emits I-packets and the junk burst.
+  Shaped devices send through `SendBuffersWithoutModify`: the reserved-byte
+  rewrite would land inside a magic header or inside handshake padding.
+- `device/noise-protocol.go`, `device/send.go`, `device/receive.go` — message
+  types are written and checked through `Device.messageType`, handshakes carry
+  their padding, and the receive path resolves both before the type switch.
 - `conn/` — the optional `NoModifySender` interface and its implementations.
   Junk packets are not WireGuard packets, so stamping the per-endpoint reserved
   routing key into their 2nd-4th bytes would only make them recognisable. It is

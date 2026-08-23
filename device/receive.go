@@ -133,8 +133,10 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 
 			// check size of packet
 
-			packet := bufsArrs[i][:size]
-			msgType := binary.LittleEndian.Uint32(packet[:4])
+			// Under AmneziaWG shaping the type word is not at a fixed offset
+			// and does not hold the canonical value; classifyPacket resolves
+			// both and hands back the message without its padding.
+			msgType, packet := device.classifyPacket(bufsArrs[i][:size])
 
 			switch msgType {
 

@@ -288,7 +288,7 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
 	handshake.mixHash(handshake.remoteStatic[:])
 
 	msg := MessageInitiation{
-		Type:      MessageInitiationType,
+		Type:      device.messageType(MessageInitiationType),
 		Ephemeral: handshake.localEphemeral.publicKey(),
 	}
 
@@ -344,7 +344,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 		chainKey [blake2s.Size]byte
 	)
 
-	if msg.Type != MessageInitiationType {
+	if msg.Type != device.messageType(MessageInitiationType) {
 		return nil
 	}
 
@@ -466,7 +466,7 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 	}
 
 	var msg MessageResponse
-	msg.Type = MessageResponseType
+	msg.Type = device.messageType(MessageResponseType)
 	msg.Sender = handshake.localIndex
 	msg.Receiver = handshake.remoteIndex
 
@@ -516,7 +516,7 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 }
 
 func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
-	if msg.Type != MessageResponseType {
+	if msg.Type != device.messageType(MessageResponseType) {
 		return nil
 	}
 
