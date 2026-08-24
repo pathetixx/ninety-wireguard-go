@@ -1,0 +1,116 @@
+name: Upstream watch
+
+# Ninety's core pins this fork by pseudo-version, so an upstream tag reaches it
+# only when somebody moves the base. This job is that somebody's reminder: once
+# a week it looks for a sagernet/wireguard-go tag newer than the base in
+# NINETY.md and opens an issue when it finds one.
+#
+# It reports rather than merges on purpose: sagernet rebases its branch, so the
+# old line stops merging cleanly and the delta has to be cherry-picked onto the
+# new tag (see NINETY.md).
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    env:
+      # gh resolves the repository from the git remotes, so a step that adds an
+      # upstream remote would otherwise send every later call to sagernet.
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Look for a newer upstream tag
+        id: compare
+        run: |
+          set -euo pipefail
+          base="$(sed -n 's/^Base: \*\*\(v[0-9][0-9A-Za-z.\-]*\)\*\*$/\1/p' NINETY.md | head -1)"
+          if [ -z "$base" ]; then
+            echo "No 'Base: **vX.Y.Z**' line in NINETY.md." >&2
+            exit 1
+          fi
+          # Upstream ships no releases, only tags, and their names do not sort:
+          # v0.0.20201121 is an old WireGuard tag that would win any version
+          # comparison against v0.0.4. Commit dates are the only honest order.
+          base_date="$(gh api "repos/sagernet/wireguard-go/commits/$base" -q .commit.committer.date)"
+          newest_tag="$base"
+          newest_date="$base_date"
+          for tag in $(gh api repos/sagernet/wireguard-go/tags --paginate -q '.[].name'); do
+            date="$(gh api "repos/sagernet/wireguard-go/commits/$tag" -q .commit.committer.date)"
+            if [[ "$date" > "$newest_date" ]]; then
+              newest_tag="$tag"
+              newest_date="$date"
+            fi
+          done
+          echo "base=$base"             >> "$GITHUB_OUTPUT"
+          echo "latest=$newest_tag"     >> "$GITHUB_OUTPUT"
+          echo "latest_date=$newest_date" >> "$GITHUB_OUTPUT"
+          if [ "$newest_tag" = "$base" ]; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+            echo "Base $base ($base_date) is the newest upstream tag."
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+            echo "Base $base ($base_date), upstream has $newest_tag ($newest_date)."
+          fi
+
+      # An open issue for this exact tag means the previous run already reported
+      # it and nobody has acted yet. Reporting it again is noise.
+      - name: Check whether this tag was already reported
+        id: reported
+        if: steps.compare.outputs.up_to_date == 'false'
+        env:
+          LATEST: ${{ steps.compare.outputs.latest }}
+        run: |
+          set -euo pipefail
+          issues="$(gh issue list --state open --search "$LATEST in:title" --json number --jq 'length' 2>/dev/null || echo 0)"
+          if [ "$issues" != "0" ]; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the issue
+        if: steps.compare.outputs.up_to_date == 'false' && steps.reported.outputs.already == 'false'
+        env:
+          BASE: ${{ steps.compare.outputs.base }}
+          LATEST: ${{ steps.compare.outputs.latest }}
+          LATEST_DATE: ${{ steps.compare.outputs.latest_date }}
+        run: |
+          set -euo pipefail
+          # The label is cosmetic, the issue is the signal: if the label cannot
+          # be created, open the issue without it rather than losing the report.
+          label_args=()
+          if gh label create upstream-sync --color ededed \
+               --description "Upstream wireguard-go tags" --force; then
+            label_args=(--label upstream-sync)
+          else
+            echo "Could not create the upstream-sync label; opening the issue without it." >&2
+          fi
+          printf '%s\n' \
+            "Upstream \`$LATEST\` ($LATEST_DATE) is newer than the base \`$BASE\`." \
+            "" \
+            "Do not merge: sagernet rebases its branch, so the old line conflicts across" \
+            "the tree. Replay the delta instead:" \
+            "" \
+            '```' \
+            "git checkout -b <new> $LATEST" \
+            "git cherry-pick <the Ninety patches>   # they apply cleanly" \
+            "git checkout ninety && git merge -s ours <new> && git read-tree --reset -u <new>" \
+            '```' \
+            "" \
+            "Then move the \`replace\` pseudo-version in ninety-core's go.mod/go.sum, tag the" \
+            "core and move \`CORE_TAG\`/\`CORE_SHA\` in Ninety." \
+            > /tmp/body.md
+          gh issue create \
+            --title "Upstream wireguard-go $LATEST is newer than the base" \
+            ${label_args[@]+"${label_args[@]}"} \
+            --body-file /tmp/body.md

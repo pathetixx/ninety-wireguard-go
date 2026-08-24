@@ -10,6 +10,11 @@ Branch `ninety` carries the delta on top of an upstream tag. `upstream`
 remote points at sagernet; updating means replaying the delta on the new tag,
 because sagernet rebases its branch and the old line stops merging cleanly.
 
+`upstream-watch.yml` reads the `Base:` line below every Monday and opens an
+issue when sagernet has a newer tag. Upstream ships no releases and its tag
+names do not sort (`v0.0.20201121` is an old WireGuard tag), so the job compares
+commit dates. Keep the `Base:` format as-is when moving to a new tag.
+
 Base: **v0.0.4**
 
 ## Delta to upstream
