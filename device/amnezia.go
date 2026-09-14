@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 
+	"github.com/sagernet/wireguard-go/conn"
 	"github.com/sagernet/wireguard-go/noise"
 )
 
@@ -138,9 +139,25 @@ func (peer *Peer) sendPackets(buffers [][]byte) error {
 	return peer.SendBuffers(buffers)
 }
 
+// sendHandshakeFlow sends what belongs on the flows of a handshake initiation:
+// the initiation itself and the junk and I-packets in front of it. A peer with
+// an endpoint resolver races the initiation over every resolved candidate and
+// has no current endpoint before the first response, so the prologue takes the
+// same fan-out - otherwise it fails outright, or reaches one flow and leaves
+// the rest opening with a bare handshake.
+func (peer *Peer) sendHandshakeFlow(buffers [][]byte, candidates []conn.Endpoint, noModify bool) error {
+	if len(candidates) > 0 {
+		return peer.sendHandshakeBuffers(buffers, candidates, noModify)
+	}
+	if noModify {
+		return peer.SendBuffersWithoutModify(buffers)
+	}
+	return peer.SendBuffers(buffers)
+}
+
 // sendAmneziaPrologue sends the I1..I5 packets and then the junk burst, in that
 // order, so the flow opens with the traffic the operator specified.
-func (peer *Peer) sendAmneziaPrologue() error {
+func (peer *Peer) sendAmneziaPrologue(candidates []conn.Endpoint) error {
 	state := peer.device.amnezia
 	if state == nil {
 		return nil
@@ -170,7 +187,7 @@ func (peer *Peer) sendAmneziaPrologue() error {
 	if len(buffers) == 0 {
 		return nil
 	}
-	return peer.sendPackets(buffers)
+	return peer.sendHandshakeFlow(buffers, candidates, peer.device.amneziaEnabled())
 }
 
 // padHandshake wraps a marshalled handshake message in its S1/S2 padding. It

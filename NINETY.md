@@ -15,7 +15,7 @@ issue when sagernet has a newer tag. Upstream ships no releases and its tag
 names do not sort (`v0.0.20201121` is an old WireGuard tag), so the job compares
 commit dates. Keep the `Base:` format as-is when moving to a new tag.
 
-Base: **v0.0.4**
+Base: **v0.0.5**
 
 ## Delta to upstream
 
@@ -45,6 +45,12 @@ signature.
   an outgoing one, `sendAmneziaPrologue` emits I-packets and the junk burst.
   Shaped devices send through `SendBuffersWithoutModify`: the reserved-byte
   rewrite would land inside a magic header or inside handshake padding.
+- `device/amnezia.go`, `device/peer.go` — `sendHandshakeFlow` sends the junk
+  burst, the I-packets and the initiation over the same flows. A peer with an
+  endpoint resolver (a domain endpoint in sing-box 1.14+) races its initiation
+  over every resolved address and has no current endpoint before the first
+  response, so the prologue goes to those candidates too; `sendHandshakeBuffers`
+  takes a `noModify` flag for that fan-out.
 - `device/noise-protocol.go`, `device/send.go`, `device/receive.go` — message
   types are written and checked through `Device.messageType`, handshakes carry
   their padding, and the receive path resolves both before the type switch.
