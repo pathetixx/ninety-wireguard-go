@@ -15,7 +15,7 @@ issue when sagernet has a newer tag. Upstream ships no releases and its tag
 names do not sort (`v0.0.20201121` is an old WireGuard tag), so the job compares
 commit dates. Keep the `Base:` format as-is when moving to a new tag.
 
-Base: **v0.0.6**
+Base: **v0.0.7**
 
 ## Delta to upstream
 
