@@ -179,8 +179,10 @@ func (o AmneziaOptions) specs() [5]string {
 // Enabled reports whether anything in the block asks for a protocol change.
 // Magic headers left at zero mean "the WireGuard defaults", not "disabled".
 func (o AmneziaOptions) Enabled() bool {
-	if o.JunkPacketCount > 0 || o.InitPacketJunkSize > 0 || o.ResponsePacketJunkSize > 0 ||
-		o.CookieReplyJunkSize > 0 || o.TransportJunkSize > 0 {
+	// Non-zero rather than positive: a negative value is a broken config, and it
+	// has to reach Validate instead of silently switching shaping off.
+	if o.JunkPacketCount != 0 || o.InitPacketJunkSize != 0 || o.ResponsePacketJunkSize != 0 ||
+		o.CookieReplyJunkSize != 0 || o.TransportJunkSize != 0 {
 		return true
 	}
 	if o.MagicHeadersSet() {
