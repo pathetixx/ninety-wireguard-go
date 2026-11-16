@@ -333,10 +333,14 @@ func (device *Device) padTransport(packets [][]byte) (padded [][]byte, allocated
 // bytes of content padding and the AEAD tag, moving the plaintext to a larger
 // pooled buffer when it cannot. Most buffers are allocated to the exact packet
 // size, with room only for WireGuard's own 16-byte padding.
+//
+// elem.packet is re-sliced over the buffer either way: a keepalive carries no
+// plaintext and leaves it nil, with no capacity to pad into.
 func (device *Device) reserveOutbound(elem *QueueOutboundElement, extra int) {
 	const offset = MessageEncapsulatingTransportSize + MessageTransportHeaderSize
 	need := offset + len(elem.packet) + extra + chacha20poly1305.Overhead
 	if len(elem.buffer) >= need {
+		elem.packet = elem.buffer[offset : offset+len(elem.packet)]
 		return
 	}
 	buffer := device.GetOutboundBuffer(need)[:need]

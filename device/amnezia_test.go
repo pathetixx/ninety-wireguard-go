@@ -534,3 +534,19 @@ func TestAmneziaPreservesReceivedBytes(t *testing.T) {
 		t.Fatal("without shaping the WARP reserved-byte clearing stays")
 	}
 }
+
+// A keepalive has no plaintext and a nil packet; content padding must still
+// find room for it in the buffer instead of slicing past a zero capacity.
+func TestReserveOutboundKeepalive(t *testing.T) {
+	device := &Device{}
+	const offset = MessageEncapsulatingTransportSize + MessageTransportHeaderSize
+	elem := &QueueOutboundElement{buffer: device.GetOutboundBuffer(MaxMessageSize)}
+	device.reserveOutbound(elem, 20)
+	if cap(elem.packet) < 20 {
+		t.Fatalf("keepalive packet has capacity %d, cannot take 20 bytes of padding", cap(elem.packet))
+	}
+	padded := elem.packet[:20]
+	if &padded[0] != &elem.buffer[offset] {
+		t.Fatal("keepalive plaintext must sit at its fixed offset")
+	}
+}
