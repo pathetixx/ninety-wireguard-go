@@ -58,6 +58,10 @@ type QueueOutboundElement struct {
 	nonce   uint64   // nonce for encryption
 	keypair *Keypair // keypair for encryption
 	peer    *Peer    // related peer
+	// keepalive is set by the encryption worker before padding: once content
+	// padding (AmneziaWG 3) is applied, a keepalive is no longer recognisable
+	// by its length.
+	keepalive bool
 }
 
 type QueueOutboundElementsContainer struct {
@@ -208,6 +212,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	// MACs cover the message only: the S1 padding in front of it is not part of
 	// the protocol, it is there to change the packet length.
 	peer.cookieGenerator.AddMacs(packet)
+	peer.device.sealHandshake(buf, packet)
 
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
@@ -247,6 +252,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 	buf, packet := peer.device.padHandshake(MessageResponseType, MessageResponseSize)
 	_ = response.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
+	peer.device.sealHandshake(buf, packet)
 
 	err = peer.BeginSymmetricSession()
 	if err != nil {
@@ -279,6 +285,7 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	reply.Type = device.messageType(MessageCookieReplyType)
 	buf, packet := device.padCookieReply()
 	_ = reply.marshal(packet)
+	device.sealHandshake(buf, packet)
 	// TODO: allocation could be avoided
 	device.net.bind.Send([][]byte{buf}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
 
@@ -694,6 +701,14 @@ func (device *Device) RoutineEncryption(id int) {
 
 	for elemsContainer := range device.queue.encryption.c {
 		for _, elem := range elemsContainer.elems {
+			elem.keepalive = len(elem.packet) == 0
+			// AmneziaWG 3 content padding may need more room than the buffer
+			// was allocated with; make it before the header is addressed.
+			contentPadding := device.contentPadding(len(elem.packet))
+			if contentPadding > 0 {
+				device.reserveOutbound(elem, contentPadding)
+			}
+
 			// populate header fields
 			header := elem.buffer[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+MessageTransportHeaderSize]
 
@@ -705,9 +720,17 @@ func (device *Device) RoutineEncryption(id int) {
 			binary.LittleEndian.PutUint32(fieldReceiver, elem.keypair.remoteIndex)
 			binary.LittleEndian.PutUint64(fieldNonce, elem.nonce)
 
-			// pad content to multiple of 16
-			paddingSize := calculatePaddingSize(len(elem.packet), int(device.tun.mtu.Load()))
-			elem.packet = append(elem.packet, paddingZeros[:paddingSize]...)
+			if contentPadding >= 0 {
+				// AmneziaWG 3: a random amount of zeros, dropped by the receiver
+				// through the IP length like the usual padding.
+				oldLen := len(elem.packet)
+				elem.packet = elem.packet[:oldLen+contentPadding]
+				clear(elem.packet[oldLen:])
+			} else {
+				// pad content to multiple of 16
+				paddingSize := calculatePaddingSize(len(elem.packet), int(device.tun.mtu.Load()))
+				elem.packet = append(elem.packet, paddingZeros[:paddingSize]...)
+			}
 
 			// encrypt content and release to consumer
 
@@ -786,7 +809,7 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 
 	dataSent := false
 	for _, elem := range elemsContainer.elems {
-		if len(elem.packet[MessageEncapsulatingTransportSize:]) != MessageKeepaliveSize {
+		if !elem.keepalive {
 			dataSent = true
 		}
 		scratch = append(scratch, elem.packet)

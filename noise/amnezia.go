@@ -6,6 +6,8 @@
 package noise
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
@@ -21,6 +23,12 @@ import (
 // AmneziaWG 2.0 is covered by the same block: S3/S4 pad the cookie reply and
 // every transport packet, and H1..H4 may be ranges ("100-200") from which each
 // packet draws its own type value.
+//
+// So is AmneziaWG 3: HeaderProtectionKey encrypts the header of every message
+// (ChaCha20 keyed by it, the first 12 bytes of the S-padding as nonce),
+// ContentPaddingAddition pads transport content by a random amount, and
+// RandomTrailers adds random bytes after handshake messages and random-length
+// padding to transport content.
 //
 // It is deliberately separate from FakePacket: that one is our own WARP noise
 // with a different packet shape, and mixing the two on one device would send
@@ -49,6 +57,11 @@ type AmneziaOptions struct {
 	ResponsePacketMagicHeader HeaderRange `json:"h2,omitzero"`
 	CookieReplyMagicHeader    HeaderRange `json:"h3,omitzero"`
 	TransportMagicHeader      HeaderRange `json:"h4,omitzero"`
+
+	// AmneziaWG 3. The key is written as in the .conf (base64) or as hex.
+	HeaderProtectionKey    string      `json:"header_protection_key,omitempty"`
+	ContentPaddingAddition HeaderRange `json:"content_padding_addition,omitzero"`
+	RandomTrailers         bool        `json:"random_trailers,omitempty"`
 
 	// I1..I5: fully specified packets sent before the junk burst. The syntax is
 	// AmneziaWG's own: a string of <tag value> chunks, see ParseSpecialPacket.
@@ -170,6 +183,9 @@ const (
 	// S4 is paid on every transport packet, on top of the MTU; past this it
 	// only fragments traffic. AmneziaWG's own generator stays far below.
 	maxTransportJunk = 256
+	// Content padding is capped by the observed packet size anyway; a range
+	// past a full datagram is a typo, not a setting.
+	maxContentPadding = 1500
 )
 
 func (o AmneziaOptions) specs() [5]string {
@@ -186,6 +202,9 @@ func (o AmneziaOptions) Enabled() bool {
 		return true
 	}
 	if o.MagicHeadersSet() {
+		return true
+	}
+	if o.HeaderProtectionKey != "" || !o.ContentPaddingAddition.IsZero() || o.RandomTrailers {
 		return true
 	}
 	for _, spec := range o.specs() {
@@ -270,6 +289,21 @@ func (o AmneziaOptions) Validate() error {
 			}
 		}
 	}
+	if o.HeaderProtectionKey != "" {
+		if _, err := o.HeaderKey(); err != nil {
+			return err
+		}
+		// The nonce is the first 12 bytes of the padding in front of each
+		// message: without them there is nothing to key the header cipher with.
+		for i, padding := range [4]int{o.InitPacketJunkSize, o.ResponsePacketJunkSize, o.CookieReplyJunkSize, o.TransportJunkSize} {
+			if padding < HeaderNonceSize {
+				return fmt.Errorf("amnezia: header protection needs s%d of at least %d, got %d", i+1, HeaderNonceSize, padding)
+			}
+		}
+	}
+	if !o.ContentPaddingAddition.IsZero() && o.ContentPaddingAddition.To > maxContentPadding {
+		return fmt.Errorf("amnezia: content padding addition %s over the %d limit", o.ContentPaddingAddition, maxContentPadding)
+	}
 	for i, spec := range o.specs() {
 		if spec == "" {
 			continue
@@ -283,6 +317,36 @@ func (o AmneziaOptions) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Header protection (AmneziaWG 3): a 32-byte ChaCha20 key and a 12-byte nonce
+// taken from the start of the padding in front of the message.
+const (
+	HeaderKeySize   = 32
+	HeaderNonceSize = 12
+)
+
+// HeaderKey decodes HeaderProtectionKey. The .conf carries it in base64;
+// AmneziaWG's own UAPI takes hex, so both are accepted.
+func (o AmneziaOptions) HeaderKey() (key [HeaderKeySize]byte, err error) {
+	text := strings.TrimSpace(o.HeaderProtectionKey)
+	var raw []byte
+	if len(text) == 2*HeaderKeySize {
+		raw, err = hex.DecodeString(text)
+	} else {
+		raw, err = base64.StdEncoding.DecodeString(text)
+		if err != nil {
+			raw, err = base64.RawURLEncoding.DecodeString(strings.TrimRight(text, "="))
+		}
+	}
+	if err != nil {
+		return key, fmt.Errorf("amnezia: header protection key: %w", err)
+	}
+	if len(raw) != HeaderKeySize {
+		return key, fmt.Errorf("amnezia: header protection key is %d bytes, want %d", len(raw), HeaderKeySize)
+	}
+	copy(key[:], raw)
+	return key, nil
 }
 
 // SpecialPackets compiles I1..I5, skipping the empty slots. Validate has

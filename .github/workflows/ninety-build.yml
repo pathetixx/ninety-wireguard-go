@@ -52,4 +52,4 @@ jobs:
         if: matrix.goos == 'linux'
         run: |
           go test ./noise/...
-          go test -run 'Amnezia|ClassifyPacket|PadTransport|SpecialPacket|JunkPacket' ./device/
+          go test -run 'Amnezia|ClassifyPacket|PadTransport|SpecialPacket|JunkPacket|ReserveOutbound' ./device/

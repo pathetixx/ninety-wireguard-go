@@ -7,6 +7,7 @@ package noise
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -143,5 +144,53 @@ func TestParseHeaderRange(t *testing.T) {
 		if _, err := ParseHeaderRange(bad); err == nil {
 			t.Fatalf("%q must be rejected", bad)
 		}
+	}
+}
+
+func TestAmnezia3Options(t *testing.T) {
+	key := "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=" // synthetic: bytes 1..32
+	full := AmneziaOptions{
+		InitPacketJunkSize: 24, ResponsePacketJunkSize: 18, CookieReplyJunkSize: 21, TransportJunkSize: 14,
+		HeaderProtectionKey: key, ContentPaddingAddition: HeaderRange{From: 16, To: 64}, RandomTrailers: true,
+	}
+	if err := full.Validate(); err != nil {
+		t.Fatalf("a typical AWG 3 config must pass: %v", err)
+	}
+	b64, err := full.HeaderKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hexForm := full
+	hexForm.HeaderProtectionKey = fmt.Sprintf("%x", b64[:])
+	if h, err := hexForm.HeaderKey(); err != nil || h != b64 {
+		t.Fatalf("hex and base64 forms of one key must agree: %v", err)
+	}
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*AmneziaOptions)
+	}{
+		{"padding below the nonce", func(o *AmneziaOptions) { o.TransportJunkSize = 11 }},
+		{"no s1", func(o *AmneziaOptions) { o.InitPacketJunkSize = 0 }},
+		{"short key", func(o *AmneziaOptions) { o.HeaderProtectionKey = "c2hvcnQ=" }},
+		{"garbage key", func(o *AmneziaOptions) { o.HeaderProtectionKey = "not a key!" }},
+		{"huge content padding", func(o *AmneziaOptions) { o.ContentPaddingAddition = HeaderRange{From: 16, To: 9000} }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			options := full
+			testCase.mutate(&options)
+			if err := options.Validate(); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+	if !(AmneziaOptions{RandomTrailers: true}).Enabled() {
+		t.Fatal("random trailers alone enable shaping")
+	}
+	var parsed AmneziaOptions
+	if err := json.Unmarshal([]byte(`{"header_protection_key":"`+key+`","content_padding_addition":"16-64","random_trailers":true}`), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.HeaderProtectionKey != key || parsed.ContentPaddingAddition != (HeaderRange{From: 16, To: 64}) || !parsed.RandomTrailers {
+		t.Fatalf("parsed: %+v", parsed)
 	}
 }

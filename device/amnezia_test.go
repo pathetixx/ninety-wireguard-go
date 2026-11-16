@@ -6,10 +6,13 @@
 package device
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"testing"
 
 	"github.com/sagernet/wireguard-go/noise"
+	"golang.org/x/crypto/chacha20"
 )
 
 // The noise package validates S1/S2 against its own copy of the message sizes,
@@ -314,5 +317,189 @@ func TestJunkPacketKeepsItsShapeOnTheWire(t *testing.T) {
 	}
 	if got := len(small) - MessageEncapsulatingTransportSize; got != junkHeaderSize(nil) {
 		t.Fatalf("undersized packet is %d bytes, want the %d-byte header", got, junkHeaderSize(nil))
+	}
+}
+
+// AmneziaWG 3 test key, the way a .conf writes it.
+var testHeaderKey = bytes.Repeat([]byte{0x5a}, noise.HeaderKeySize)
+
+func amnezia3Device(t *testing.T, trailers bool) *Device {
+	t.Helper()
+	device := &Device{}
+	err := device.SetNoise(noise.Options{Amnezia: noise.AmneziaOptions{
+		InitPacketJunkSize: 24, ResponsePacketJunkSize: 18,
+		CookieReplyJunkSize: 21, TransportJunkSize: 14,
+		InitPacketMagicHeader:     noise.HeaderRange{From: 110000000, To: 110020000},
+		ResponsePacketMagicHeader: noise.HeaderRange{From: 1210000000, To: 1210020000},
+		CookieReplyMagicHeader:    noise.HeaderRange{From: 1510000000, To: 1510020000},
+		TransportMagicHeader:      noise.HeaderRange{From: 1910000000, To: 1910020000},
+		HeaderProtectionKey:       base64.StdEncoding.EncodeToString(testHeaderKey),
+		ContentPaddingAddition:    noise.HeaderRange{From: 16, To: 64},
+		RandomTrailers:            trailers,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return device
+}
+
+// referenceXOR is AmneziaWG's header protection written out independently of
+// the device code: ChaCha20 keyed by the header key, the first 12 bytes of the
+// padding as nonce, keystream from position 0.
+func referenceXOR(t *testing.T, nonce, data []byte) []byte {
+	t.Helper()
+	cipher, err := chacha20.NewUnauthenticatedCipher(testHeaderKey, nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]byte, len(data))
+	cipher.XORKeyStream(out, data)
+	return out
+}
+
+// A protected handshake message goes out as padding || ChaCha20(message) ||
+// trailer, and comes back as the original message.
+func TestAmnezia3HandshakeWireFormat(t *testing.T) {
+	device := amnezia3Device(t, true)
+	device.amnezia.udpWindow.Store(1400)
+	for _, testCase := range []struct {
+		name        string
+		messageType uint32
+		size        int
+		padding     int
+	}{
+		{"initiation", MessageInitiationType, MessageInitiationSize, 24},
+		{"response", MessageResponseType, MessageResponseSize, 18},
+		{"cookie reply", MessageCookieReplyType, MessageCookieReplySize, 21},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			sawTrailer := false
+			for i := 0; i < 32; i++ {
+				buffer, message := device.padHandshake(testCase.messageType, testCase.size)
+				binary.LittleEndian.PutUint32(message[:4], device.messageType(testCase.messageType))
+				for j := 4; j < len(message); j++ {
+					message[j] = byte(j * 7)
+				}
+				plain := append([]byte(nil), message...)
+				device.sealHandshake(buffer, message)
+
+				onWire := buffer[MessageEncapsulatingTransportSize:]
+				nonce := onWire[:noise.HeaderNonceSize]
+				if !bytes.Equal(onWire[testCase.padding:testCase.padding+testCase.size], referenceXOR(t, nonce, plain)) {
+					t.Fatal("message on the wire is not ChaCha20(message) under the padding nonce")
+				}
+				if len(onWire) > testCase.padding+testCase.size {
+					sawTrailer = true
+				}
+
+				received := append([]byte(nil), onWire...)
+				gotType, gotMessage := device.classifyPacket(received)
+				if gotType != testCase.messageType {
+					t.Fatalf("type: got %d, want %d", gotType, testCase.messageType)
+				}
+				if !bytes.Equal(gotMessage, plain) {
+					t.Fatal("decrypted message differs from what was sent")
+				}
+			}
+			if !sawTrailer {
+				t.Fatal("random trailers are on, yet no packet carried one")
+			}
+		})
+	}
+}
+
+// A protected transport packet has only its 16-byte header encrypted; the
+// receiver decrypts it and drops the S4 padding.
+func TestAmnezia3TransportWireFormat(t *testing.T) {
+	device := amnezia3Device(t, false)
+	const content = 64
+	framed := make([]byte, MessageEncapsulatingTransportSize+MessageTransportSize+content)
+	message := framed[MessageEncapsulatingTransportSize:]
+	binary.LittleEndian.PutUint32(message[:4], device.messageType(MessageTransportType))
+	binary.LittleEndian.PutUint32(message[4:8], 0x01020304)
+	binary.LittleEndian.PutUint64(message[8:16], 77)
+	for i := MessageTransportHeaderSize; i < len(message); i++ {
+		message[i] = byte(i)
+	}
+	plain := append([]byte(nil), message...)
+
+	wire, padded := device.padTransport([][]byte{framed})
+	if !padded {
+		t.Fatal("S4 is set, the batch must be padded")
+	}
+	defer device.releasePadded(wire)
+	onWire := wire[0][MessageEncapsulatingTransportSize:]
+	nonce := onWire[:noise.HeaderNonceSize]
+	if !bytes.Equal(onWire[14:14+MessageTransportHeaderSize], referenceXOR(t, nonce, plain[:MessageTransportHeaderSize])) {
+		t.Fatal("transport header on the wire is not ChaCha20(header)")
+	}
+	if !bytes.Equal(onWire[14+MessageTransportHeaderSize:], plain[MessageTransportHeaderSize:]) {
+		t.Fatal("header protection must leave the encrypted payload alone")
+	}
+
+	received := append([]byte(nil), onWire...)
+	gotType, gotPacket := device.classifyPacket(received)
+	if gotType != MessageTransportType || !bytes.Equal(gotPacket, plain) {
+		t.Fatalf("transport round trip failed: type %d", gotType)
+	}
+}
+
+// A device with another key does not recognise the traffic.
+func TestAmnezia3WrongKey(t *testing.T) {
+	sender := amnezia3Device(t, false)
+	buffer, message := sender.padHandshake(MessageInitiationType, MessageInitiationSize)
+	binary.LittleEndian.PutUint32(message[:4], sender.messageType(MessageInitiationType))
+	sender.sealHandshake(buffer, message)
+
+	receiver := amnezia3Device(t, false)
+	receiver.amnezia.headerKey[0] ^= 0xff
+	if gotType, _ := receiver.classifyPacket(append([]byte(nil), buffer[MessageEncapsulatingTransportSize:]...)); gotType != 0 {
+		t.Fatalf("a packet under another key was recognised as %d", gotType)
+	}
+}
+
+// Content padding stays within its range and never grows a packet past the
+// largest datagram seen so far.
+func TestAmnezia3ContentPadding(t *testing.T) {
+	device := amnezia3Device(t, false)
+	device.amnezia.udpWindow.Store(1400)
+	for i := 0; i < 200; i++ {
+		if pad := device.contentPadding(100); pad < 16 || pad > 64 {
+			t.Fatalf("padding %d outside 16-64", pad)
+		}
+	}
+	// 14 (S4) + 32 + plaintext: 10 bytes of room left under a 500-byte window.
+	device.amnezia.udpWindow.Store(500)
+	if pad := device.contentPadding(500 - 14 - MessageTransportSize - 10); pad > 10 {
+		t.Fatalf("padding %d exceeds the 10 bytes the window leaves", pad)
+	}
+	plain := &Device{}
+	if err := plain.SetNoise(noise.Options{Amnezia: noise.AmneziaOptions{TransportJunkSize: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	if pad := plain.contentPadding(100); pad != -1 {
+		t.Fatalf("without content padding or trailers the WireGuard rule applies, got %d", pad)
+	}
+}
+
+// Content padding larger than the buffer was allocated for moves the
+// plaintext to a bigger buffer instead of overrunning it.
+func TestReserveOutboundGrowsBuffer(t *testing.T) {
+	device := &Device{}
+	const offset = MessageEncapsulatingTransportSize + MessageTransportHeaderSize
+	elem := &QueueOutboundElement{buffer: device.GetOutboundBuffer(offset + 40 + 16 + 16)}
+	elem.packet = elem.buffer[offset : offset+40]
+	for i := range elem.packet {
+		elem.packet[i] = byte(i + 1)
+	}
+	device.reserveOutbound(elem, 200)
+	if len(elem.buffer) < offset+40+200+16 {
+		t.Fatalf("buffer is %d bytes, too small for the padding", len(elem.buffer))
+	}
+	if len(elem.packet) != 40 || elem.packet[0] != 1 || elem.packet[39] != 40 {
+		t.Fatal("plaintext did not move with the buffer")
+	}
+	if &elem.packet[0] != &elem.buffer[offset] {
+		t.Fatal("plaintext must stay at its fixed offset")
 	}
 }
