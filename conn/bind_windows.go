@@ -81,6 +81,15 @@ type WinRingBind struct {
 	v4, v6 afWinRingBind
 	mu     sync.RWMutex
 	isOpen atomic.Uint32 // 0, 1, or 2
+
+	// preserveReceived turns off the reserved-byte clearing on receive; see
+	// ReceivePreserver.
+	preserveReceived atomic.Bool
+}
+
+// SetPreserveReceived implements ReceivePreserver.
+func (bind *WinRingBind) SetPreserveReceived(preserve bool) {
+	bind.preserveReceived.Store(preserve)
 }
 
 func NewDefaultBind(externalControl control.Func) Bind {
@@ -461,7 +470,7 @@ func (bind *WinRingBind) receiveIPv4(bufs [][]byte, sizes []int, eps []Endpoint)
 	bind.mu.RLock()
 	defer bind.mu.RUnlock()
 	n, ep, err := bind.v4.Receive(bufs[0], &bind.isOpen)
-	if n > 3 {
+	if n > 3 && !bind.preserveReceived.Load() {
 		common.ClearArray(bufs[0][1:4])
 	}
 	sizes[0] = n
@@ -473,7 +482,7 @@ func (bind *WinRingBind) receiveIPv6(bufs [][]byte, sizes []int, eps []Endpoint)
 	bind.mu.RLock()
 	defer bind.mu.RUnlock()
 	n, ep, err := bind.v6.Receive(bufs[0], &bind.isOpen)
-	if n > 3 {
+	if n > 3 && !bind.preserveReceived.Load() {
 		common.ClearArray(bufs[0][1:4])
 	}
 	sizes[0] = n

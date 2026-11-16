@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"testing"
 
+	"github.com/sagernet/wireguard-go/conn"
 	"github.com/sagernet/wireguard-go/noise"
 	"golang.org/x/crypto/chacha20"
 )
@@ -501,5 +502,35 @@ func TestReserveOutboundGrowsBuffer(t *testing.T) {
 	}
 	if &elem.packet[0] != &elem.buffer[offset] {
 		t.Fatal("plaintext must stay at its fixed offset")
+	}
+}
+
+// preservingBind records what the device asked of it; the embedded Bind is
+// never called.
+type preservingBind struct {
+	conn.Bind
+	preserve *bool
+}
+
+func (b preservingBind) SetPreserveReceived(preserve bool) { *b.preserve = preserve }
+
+// Binds clear bytes 1..3 of incoming packets for WARP. Under shaping those
+// bytes are the nonce or a magic header, so the device must turn that off,
+// and leave it on for plain WireGuard.
+func TestAmneziaPreservesReceivedBytes(t *testing.T) {
+	preserve := false
+	device := &Device{}
+	device.net.bind = preservingBind{preserve: &preserve}
+	if err := device.SetNoise(noise.Options{Amnezia: noise.AmneziaOptions{TransportJunkSize: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	if !preserve {
+		t.Fatal("shaping is on, received packets must stay intact")
+	}
+	if err := device.SetNoise(noise.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if preserve {
+		t.Fatal("without shaping the WARP reserved-byte clearing stays")
 	}
 }

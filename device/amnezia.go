@@ -76,6 +76,11 @@ func (device *Device) SetNoise(options noise.Options) error {
 		return errors.New("noise: fake_packet and amnezia both send a junk burst before the handshake; pick one")
 	}
 	device.Noise = options
+	// Binds clear bytes 1..3 of incoming packets for WARP; under shaping those
+	// bytes carry padding, a magic header or the header-protection nonce.
+	if preserver, ok := device.net.bind.(conn.ReceivePreserver); ok {
+		preserver.SetPreserveReceived(options.Amnezia.Enabled())
+	}
 	if !options.Amnezia.Enabled() {
 		device.amnezia = nil
 		return nil

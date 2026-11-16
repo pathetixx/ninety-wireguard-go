@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/sagernet/sing/common"
@@ -64,6 +65,15 @@ type StdNetBind struct {
 
 	blackhole4 bool
 	blackhole6 bool
+
+	// preserveReceived turns off the reserved-byte clearing on receive; see
+	// ReceivePreserver.
+	preserveReceived atomic.Bool
+}
+
+// SetPreserveReceived implements ReceivePreserver.
+func (s *StdNetBind) SetPreserveReceived(preserve bool) {
+	s.preserveReceived.Store(preserve)
 }
 
 func NewStdNetBind(externalControl control.Func) Bind {
@@ -275,7 +285,7 @@ again:
 				return 0, err
 			}
 			sizes[0] = dataLength
-			if dataLength > 3 {
+			if dataLength > 3 && !s.preserveReceived.Load() {
 				common.ClearArray(bufs[0][1:4])
 			}
 			endpoints[0] = &StdNetEndpoint{AddrPort: source}
@@ -381,7 +391,7 @@ func (s *StdNetBind) receiveIP(
 		if sizes[i] == 0 {
 			continue
 		}
-		if msg.N > 3 {
+		if msg.N > 3 && !s.preserveReceived.Load() {
 			common.ClearArray(bufs[i][1:4])
 		}
 		ep := &StdNetEndpoint{AddrPort: M.AddrPortFromNet(msg.Addr)} // TODO: remove allocation

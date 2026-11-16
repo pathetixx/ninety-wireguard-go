@@ -43,6 +43,15 @@ type NoModifySender interface {
 	SendWithoutModify(bufs [][]byte, ep Endpoint, offset int) error
 }
 
+// ReceivePreserver is implemented by binds that clear bytes 1..3 of every
+// incoming packet: that is where WARP puts its reserved routing key. Under
+// AmneziaWG shaping the same bytes are padding, a magic header or the
+// header-protection nonce, so the device turns the clearing off when shaping
+// is configured. Reserved bytes and shaping cannot be combined.
+type ReceivePreserver interface {
+	SetPreserveReceived(preserve bool)
+}
+
 type Bind interface {
 	// Open puts the Bind into a listening state on a given port and reports the actual
 	// port that it bound to. Passing zero results in a random selection.
