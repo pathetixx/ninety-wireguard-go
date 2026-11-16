@@ -14,17 +14,20 @@ import (
 	"github.com/sagernet/wireguard-go/noise"
 )
 
-// AmneziaWG shaping, as configured by an imported .conf. Three things change
-// on the wire, and all three have to be applied on send and undone on receive
-// or the tunnel dies silently:
+// AmneziaWG shaping, as configured by an imported .conf. Everything below
+// changes the wire, and has to be applied on send and undone on receive or the
+// tunnel dies silently:
 //
 //   - Jc/Jmin/Jmax: junk packets before the handshake initiation.
 //   - S1/S2: random bytes in front of the initiation and response messages.
-//   - H1..H4: the four message type constants.
+//   - S3/S4 (2.0): the same in front of the cookie reply and every transport
+//     packet.
+//   - H1..H4: the four message type constants; in 2.0 each one is a range and
+//     every packet draws its own value from it.
 //   - I1..I5: fully specified packets sent ahead of everything else.
 type amneziaState struct {
 	// headers is indexed by the canonical message type (1..4); slot 0 is unused.
-	headers [5]uint32
+	headers [5]noise.HeaderRange
 	// padding is indexed the same way: bytes prepended to a message of that type.
 	padding [5]int
 
@@ -64,6 +67,8 @@ func (device *Device) SetNoise(options noise.Options) error {
 	state.headers[MessageTransportType] = transport
 	state.padding[MessageInitiationType] = options.Amnezia.InitPacketJunkSize
 	state.padding[MessageResponseType] = options.Amnezia.ResponsePacketJunkSize
+	state.padding[MessageCookieReplyType] = options.Amnezia.CookieReplyJunkSize
+	state.padding[MessageTransportType] = options.Amnezia.TransportJunkSize
 	device.amnezia = state
 	return nil
 }
@@ -73,16 +78,25 @@ func (device *Device) amneziaEnabled() bool {
 }
 
 // messageType maps a canonical WireGuard message type to the value that goes on
-// the wire.
+// the wire. With a 2.0 range every call draws a fresh value.
 func (device *Device) messageType(canonical uint32) uint32 {
 	if device.amnezia == nil {
 		return canonical
 	}
-	return device.amnezia.headers[canonical]
+	return device.amnezia.headers[canonical].Pick()
+}
+
+// isMessageType reports whether a type word read off the wire stands for the
+// canonical message type: equal to it without shaping, inside H1..H4 with it.
+func (device *Device) isMessageType(canonical, value uint32) bool {
+	if device.amnezia == nil {
+		return value == canonical
+	}
+	return device.amnezia.headers[canonical].Contains(value)
 }
 
 // messagePadding is the number of random bytes prepended to a message of this
-// type. Only the two handshake messages carry padding.
+// type: S1..S4 for initiation, response, cookie reply and transport.
 func (device *Device) messagePadding(canonical uint32) int {
 	if device.amnezia == nil {
 		return 0
@@ -94,9 +108,15 @@ func (device *Device) messagePadding(canonical uint32) int {
 // returns the canonical message type together with the packet without its
 // padding. A zero type means "not ours"; the caller drops the packet.
 //
-// Order matters: transport is by far the most common packet, so it is tried
-// first, and the handshake messages are told apart by length before their type
-// word is even read.
+// The handshake messages have fixed lengths, so they are tried first and by
+// length before their type word is even read; only then transport. The other
+// order would let the random padding of a handshake message pass for a
+// transport header whenever its bytes happen to land in a wide H4 range. This
+// is the order AmneziaWG itself uses.
+//
+// A transport packet loses its S4 padding in place: it is moved to the front of
+// the buffer, because the receive path addresses the decrypted content from the
+// buffer start.
 func (device *Device) classifyPacket(packet []byte) (uint32, []byte) {
 	state := device.amnezia
 	if state == nil {
@@ -104,10 +124,6 @@ func (device *Device) classifyPacket(packet []byte) (uint32, []byte) {
 			return 0, packet
 		}
 		return binary.LittleEndian.Uint32(packet[:4]), packet
-	}
-	if len(packet) >= MessageTransportSize &&
-		binary.LittleEndian.Uint32(packet[:4]) == state.headers[MessageTransportType] {
-		return MessageTransportType, packet
 	}
 	for _, candidate := range [3]struct {
 		messageType uint32
@@ -121,11 +137,53 @@ func (device *Device) classifyPacket(packet []byte) (uint32, []byte) {
 		if len(packet) != padding+candidate.size {
 			continue
 		}
-		if binary.LittleEndian.Uint32(packet[padding:padding+4]) == state.headers[candidate.messageType] {
+		if state.headers[candidate.messageType].Contains(binary.LittleEndian.Uint32(packet[padding : padding+4])) {
 			return candidate.messageType, packet[padding:]
 		}
 	}
+	padding := state.padding[MessageTransportType]
+	if len(packet) >= padding+MessageTransportSize &&
+		state.headers[MessageTransportType].Contains(binary.LittleEndian.Uint32(packet[padding:padding+4])) {
+		if padding > 0 {
+			copy(packet, packet[padding:])
+			packet = packet[:len(packet)-padding]
+		}
+		return MessageTransportType, packet
+	}
 	return 0, packet
+}
+
+// padTransport puts S4 random bytes in front of each framed transport packet.
+// A framed packet keeps MessageEncapsulatingTransportSize free bytes at its
+// start for the bind, so the padding goes right after them. The padded copies
+// come from the outbound pool; the caller returns them with releasePadded once
+// the batch is sent. Without S4 the batch is returned as is and nothing is
+// allocated.
+func (device *Device) padTransport(packets [][]byte) (padded [][]byte, allocated bool) {
+	padding := device.messagePadding(MessageTransportType)
+	if padding <= 0 {
+		return packets, false
+	}
+	padded = make([][]byte, len(packets))
+	for i, packet := range packets {
+		out := device.GetOutboundBuffer(len(packet) + padding)[:len(packet)+padding]
+		_, _ = rand.Read(out[MessageEncapsulatingTransportSize : MessageEncapsulatingTransportSize+padding])
+		copy(out[MessageEncapsulatingTransportSize+padding:], packet[MessageEncapsulatingTransportSize:])
+		padded[i] = out
+	}
+	return padded, true
+}
+
+func (device *Device) releasePadded(packets [][]byte) {
+	for _, packet := range packets {
+		device.PutOutboundBuffer(packet)
+	}
+}
+
+// padCookieReply wraps a cookie reply in its S3 padding, the way padHandshake
+// does for the handshake messages.
+func (device *Device) padCookieReply() (buffer, message []byte) {
+	return device.padHandshake(MessageCookieReplyType, MessageCookieReplySize)
 }
 
 // sendPackets sends already framed packets, keeping the reserved-byte rewrite

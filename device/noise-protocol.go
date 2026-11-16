@@ -344,7 +344,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 		chainKey [blake2s.Size]byte
 	)
 
-	if msg.Type != device.messageType(MessageInitiationType) {
+	if !device.isMessageType(MessageInitiationType, msg.Type) {
 		return nil
 	}
 
@@ -521,7 +521,7 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 }
 
 func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
-	if msg.Type != device.messageType(MessageResponseType) {
+	if !device.isMessageType(MessageResponseType, msg.Type) {
 		return nil
 	}
 

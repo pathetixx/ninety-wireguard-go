@@ -51,14 +51,14 @@ func TestAmneziaValidate(t *testing.T) {
 		},
 		{
 			name:    "partial magic headers",
-			options: noise.AmneziaOptions{InitPacketMagicHeader: 5},
+			options: noise.AmneziaOptions{InitPacketMagicHeader: noise.Single(5)},
 			wantErr: true,
 		},
 		{
 			name: "duplicate magic headers",
 			options: noise.AmneziaOptions{
-				InitPacketMagicHeader: 5, ResponsePacketMagicHeader: 5,
-				CookieReplyMagicHeader: 7, TransportMagicHeader: 8,
+				InitPacketMagicHeader: noise.Single(5), ResponsePacketMagicHeader: noise.Single(5),
+				CookieReplyMagicHeader: noise.Single(7), TransportMagicHeader: noise.Single(8),
 			},
 			wantErr: true,
 		},
@@ -67,8 +67,8 @@ func TestAmneziaValidate(t *testing.T) {
 			options: noise.AmneziaOptions{
 				JunkPacketCount: 4, JunkPacketMinSize: 8, JunkPacketMaxSize: 80,
 				InitPacketJunkSize: 15, ResponsePacketJunkSize: 20,
-				InitPacketMagicHeader: 1020983529, ResponsePacketMagicHeader: 1449520552,
-				CookieReplyMagicHeader: 1120404579, TransportMagicHeader: 1741401686,
+				InitPacketMagicHeader: noise.Single(1020983529), ResponsePacketMagicHeader: noise.Single(1449520552),
+				CookieReplyMagicHeader: noise.Single(1120404579), TransportMagicHeader: noise.Single(1741401686),
 				SpecialPacket1: "<b 0xdeadbeef>",
 			},
 		},
@@ -93,8 +93,8 @@ func TestAmneziaClassifyRoundTrip(t *testing.T) {
 	device := &Device{}
 	err := device.SetNoise(noise.Options{Amnezia: noise.AmneziaOptions{
 		InitPacketJunkSize: 15, ResponsePacketJunkSize: 20,
-		InitPacketMagicHeader: 1020983529, ResponsePacketMagicHeader: 1449520552,
-		CookieReplyMagicHeader: 1120404579, TransportMagicHeader: 1741401686,
+		InitPacketMagicHeader: noise.Single(1020983529), ResponsePacketMagicHeader: noise.Single(1449520552),
+		CookieReplyMagicHeader: noise.Single(1120404579), TransportMagicHeader: noise.Single(1741401686),
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +127,107 @@ func TestAmneziaClassifyRoundTrip(t *testing.T) {
 
 	if gotType, _ := device.classifyPacket(make([]byte, MessageInitiationSize)); gotType != 0 {
 		t.Fatalf("a plain WireGuard initiation must not be recognised, got type %d", gotType)
+	}
+}
+
+// AmneziaWG 2.0: every message type is a range, the cookie reply and transport
+// carry S3/S4 padding, and each packet draws its own type value. Whatever the
+// device sends it must recognise, with the padding gone.
+func TestAmnezia2ClassifyRoundTrip(t *testing.T) {
+	device := &Device{}
+	err := device.SetNoise(noise.Options{Amnezia: noise.AmneziaOptions{
+		InitPacketJunkSize: 15, ResponsePacketJunkSize: 20,
+		CookieReplyJunkSize: 23, TransportJunkSize: 11,
+		InitPacketMagicHeader:     noise.HeaderRange{From: 100000, To: 200000},
+		ResponsePacketMagicHeader: noise.HeaderRange{From: 300000, To: 400000},
+		CookieReplyMagicHeader:    noise.HeaderRange{From: 500000, To: 600000},
+		TransportMagicHeader:      noise.HeaderRange{From: 700000, To: 800000},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, testCase := range []struct {
+		name        string
+		messageType uint32
+		size        int
+	}{
+		{"initiation", MessageInitiationType, MessageInitiationSize},
+		{"response", MessageResponseType, MessageResponseSize},
+		{"cookie reply", MessageCookieReplyType, MessageCookieReplySize},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			for i := 0; i < 64; i++ {
+				buffer, message := device.padHandshake(testCase.messageType, testCase.size)
+				value := device.messageType(testCase.messageType)
+				if !device.isMessageType(testCase.messageType, value) {
+					t.Fatalf("drew %d outside its own range", value)
+				}
+				binary.LittleEndian.PutUint32(message[:4], value)
+				gotType, gotPacket := device.classifyPacket(buffer[MessageEncapsulatingTransportSize:])
+				if gotType != testCase.messageType || len(gotPacket) != testCase.size {
+					t.Fatalf("got type %d size %d, want %d size %d", gotType, len(gotPacket), testCase.messageType, testCase.size)
+				}
+			}
+		})
+	}
+
+	t.Run("transport", func(t *testing.T) {
+		const content = 48
+		framed := make([]byte, MessageEncapsulatingTransportSize+MessageTransportSize+content)
+		message := framed[MessageEncapsulatingTransportSize:]
+		binary.LittleEndian.PutUint32(message[:4], device.messageType(MessageTransportType))
+		binary.LittleEndian.PutUint32(message[4:8], 0xA1B2C3D4)
+		for i := MessageTransportHeaderSize; i < len(message); i++ {
+			message[i] = byte(i)
+		}
+		want := append([]byte(nil), message...)
+
+		wire, padded := device.padTransport([][]byte{framed})
+		if !padded {
+			t.Fatal("S4 is set, the batch must be padded")
+		}
+		defer device.releasePadded(wire)
+		onWire := wire[0][MessageEncapsulatingTransportSize:]
+		if len(onWire) != len(want)+11 {
+			t.Fatalf("padded packet is %d bytes, want %d", len(onWire), len(want)+11)
+		}
+		// The receive buffer is the classifier's to rearrange; work on a copy.
+		received := append([]byte(nil), onWire...)
+		gotType, gotPacket := device.classifyPacket(received)
+		if gotType != MessageTransportType {
+			t.Fatalf("type: got %d", gotType)
+		}
+		if string(gotPacket) != string(want) {
+			t.Fatal("transport packet did not survive the padding round trip")
+		}
+		if &gotPacket[0] != &received[0] {
+			t.Fatal("the unpadded packet must start at the buffer start")
+		}
+	})
+
+	// A value from another message's range is not this message.
+	if device.isMessageType(MessageInitiationType, 350000) {
+		t.Fatal("a response-range value passed as an initiation")
+	}
+	// Plain WireGuard does not get through a 2.0 device.
+	plain := make([]byte, MessageTransportSize)
+	binary.LittleEndian.PutUint32(plain[:4], MessageTransportType)
+	if gotType, _ := device.classifyPacket(plain); gotType != 0 {
+		t.Fatalf("a plain transport packet was recognised as %d", gotType)
+	}
+}
+
+// Without S4 the send path stays allocation-free: the batch goes out as is.
+func TestPadTransportWithoutS4(t *testing.T) {
+	device := &Device{}
+	if err := device.SetNoise(noise.Options{Amnezia: noise.AmneziaOptions{JunkPacketCount: 2, JunkPacketMinSize: 8, JunkPacketMaxSize: 16}}); err != nil {
+		t.Fatal(err)
+	}
+	batch := [][]byte{make([]byte, 64)}
+	wire, padded := device.padTransport(batch)
+	if padded || &wire[0][0] != &batch[0][0] {
+		t.Fatal("without S4 the batch must not be copied")
 	}
 }
 

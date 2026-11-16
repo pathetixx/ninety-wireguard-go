@@ -46,6 +46,10 @@ jobs:
           CGO_ENABLED: "0"
         run: go build $(go list ./... | grep -v '^github.com/sagernet/wireguard-go$')
 
+      # The AmneziaWG wire path (padding, magic headers, classification) lives
+      # in device; only its own tests run there, the upstream suite is not ours.
       - name: Test
         if: matrix.goos == 'linux'
-        run: go test ./noise/...
+        run: |
+          go test ./noise/...
+          go test -run 'Amnezia|ClassifyPacket|PadTransport|SpecialPacket|JunkPacket' ./device/

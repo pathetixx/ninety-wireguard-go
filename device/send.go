@@ -277,8 +277,7 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	}
 
 	reply.Type = device.messageType(MessageCookieReplyType)
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageCookieReplySize)
-	packet := buf[MessageEncapsulatingTransportSize:]
+	buf, packet := device.padCookieReply()
 	_ = reply.marshal(packet)
 	// TODO: allocation could be avoided
 	device.net.bind.Send([][]byte{buf}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
@@ -796,7 +795,12 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	err := peer.sendPackets(scratch)
+	// AmneziaWG 2.0 S4: random bytes in front of every transport packet.
+	wire, padded := device.padTransport(scratch)
+	err := peer.sendPackets(wire)
+	if padded {
+		device.releasePadded(wire)
+	}
 	if dataSent {
 		peer.timersDataSent()
 	}
